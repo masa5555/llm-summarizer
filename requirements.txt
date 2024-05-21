@@ -2,3 +2,4 @@ youtube-transcript-api
 requests
 anthropic
 bs4
+python-dotenv
