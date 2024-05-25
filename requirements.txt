@@ -3,3 +3,4 @@ requests
 anthropic
 bs4
 python-dotenv
+notion-client
