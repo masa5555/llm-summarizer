@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from notion_client import Client as notionClient
 
 load_dotenv()
+def isJapanese(text):
+    return re.search(r'[ぁ-んァ-ヴ]', text)
 
 url = input("Enter URL: ")
 
@@ -25,31 +27,36 @@ if title == "403 Forbidden":
     print("403 Forbidden")
     exit()
 
+word_list = []
 chunked_transcript = []
-CHUNK_WORD_LIMIT = 1000
+JP_CHUNK_LENGTH_LIMIT = 2000
+EN_CHUNK_WORD_LIMIT = 1000
 
 if url.find("youtube.com") != -1:
     videoId = url.split("v=")[1]
-    transcript = YouTubeTranscriptApi.get_transcript(videoId)
-
-    chunk = ""
-    for i in transcript:
-        chunk += i['text'] + " "
-        if len(chunk.split(" ")) > CHUNK_WORD_LIMIT:
-            chunked_transcript.append(chunk)
-            chunk = ""
-    chunked_transcript.append(chunk)
+    transcript = YouTubeTranscriptApi.get_transcript(videoId, languages=['en', 'ja'])
+    for t in transcript:
+        word_list.append(t['text'])
 else:
     text = soup.get_text()
     text = textwrap.dedent(text)
     word_list = text.split()
-    chunk = ""
-    for word in word_list:
-        chunk += word + " "
-        if len(chunk.split(" ")) > CHUNK_WORD_LIMIT:
-            chunked_transcript.append(chunk)
-            chunk = ""
-    chunked_transcript.append(chunk)
+
+chunk = ""
+for word in word_list:
+    chunk += word + " "
+    # ひらがなが含まれている
+    if len(chunk) > JP_CHUNK_LENGTH_LIMIT and isJapanese(chunk):
+        chunked_transcript.append(chunk)
+        chunk = ""
+        continue
+    # 英語の時
+    if len(chunk.split(" ")) > EN_CHUNK_WORD_LIMIT and not isJapanese(chunk):
+        chunked_transcript.append(chunk)
+        chunk = ""
+        continue
+chunked_transcript.append(chunk)
+print("---chunk length---", len(chunked_transcript))
 
 client = Anthropic(
     api_key=os.getenv("ANTHROPIC_API_KEY"),
@@ -62,10 +69,10 @@ systemPrompt = """
 ・与えられた文章がどんな言語でも日本語で要約を出力しなさい。
 　・文書として情報量のない言葉は要約の中に絶対に入れないでください。
 　・参考文献をURLで引用している場合は箇条書き要素の文末に追加しなさい。
-・出力フォーマットはマークダウンで主にネストされた箇条書きで文書として構造化して応答しなさい。出力例```# 要約した内容が一言でわかるタイトル\n- XXX\n   - XXXの詳細1\n   - XXXの詳細2\n - YYY\n```
+・出力フォーマットはマークダウンで主にネストされた箇条書きで文書として構造化して応答しなさい。出力例```# 要約した内容が一言でわかるタイトル\n - XXX\n  - XXXの詳細1\n  - XXXの詳細2\n- YYY\n```
 """
 
-def requestLLM(prompt):
+def requestLLM(systemPrompt, prompt):
     message = client.messages.create(
         max_tokens=1024,
         messages=[
@@ -77,7 +84,7 @@ def requestLLM(prompt):
         system=systemPrompt,
         model="claude-3-haiku-20240307",
     )
-    print("------------------Usage--------------", message.usage)
+    print(message.usage)
     return message.content[0].text
 
 def createNotionPage(title, url):
@@ -164,35 +171,60 @@ with open("summaries/{} {}.md".format(title, datetime.datetime.now().strftime('%
     pageId = createNotionPage(title, url)
     ansTextSum = ""
     for script in chunked_transcript:
-        ansText = requestLLM(script)
-        ansTextSum += ansText
+        ansText = requestLLM(systemPrompt, "以下の文章に対して日本語で回答を出力しなさい\n```" + script + "\n```")
+        
         # ひらがなが含まれているかどうかで判定
-        print("re.match(r'[ぁ-ん]', ansText)----------", re.match(r'[ぁ-ん]', ansText))
-        if not re.match(r'[ぁ-ん]', ansText):
-            message = requestLLM("以下の文章を日本語に変換してください\n```" + ansText + "\n```" )
+        print("---isJapanase---", isJapanese(ansText))
+        retryCount = 3
+        while not isJapanese(ansText) and retryCount > 0:
+            ansText = requestLLM(systemPrompt, "以下の文章を日本語に翻訳しなさい\n```" + script + "\n```" )
+            retryCount -= 1
+            if retryCount == 0:
+                break
+        ansTextSum += ansText
 
         f.write(ansText + "\n\n")
         ansTextLines = ansText.split("\n")
         blocks = []
+        exceptTexts = ["", "リスト"]
         for line in ansTextLines:
             if line.startswith("# "):
+                if line.replace("# ", "") in exceptTexts:
+                    continue
                 blocks.append(createNotionBlock("heading_1", line.replace("# ", "")))
             elif line.startswith("## "):
+                if line.replace("## ", "") in exceptTexts:
+                    continue
                 blocks.append(createNotionBlock("heading_2", line.replace("## ", "")))
             elif line.startswith("### "):
+                if line.replace("### ", "") in exceptTexts:
+                    continue
                 blocks.append(createNotionBlock("heading_3", line.replace("### ", "")))
+            elif line.startswith("  - "):
+                if line.replace("  - ", "") in exceptTexts:
+                    continue
+                block = createNotionBlock("bulleted_list_item", line.replace("  - ", ""))
+                blocks[-1]["bulleted_list_item"]["children"] = [block]
             else:
-                blocks.append(createNotionBlock("bulleted_list_item", line))
+                if line.replace("- ", "") in exceptTexts:
+                    continue
+                blocks.append(createNotionBlock("bulleted_list_item", line.replace("- ", "")))
+
         # print(blocks)
 
         notion.blocks.children.append(
             block_id=pageId,
             children=blocks
         )
-    summary = requestLLM("以下の文章を1文かつ100文字以内で要約し、その要約1文のみ短答してください。それ以外の文字は出力に含めないでください。\n```" + ansTextSum + "\n```" )
-    tagsText = requestLLM("以下の文章から主要なキーワードを重要度が高い順に5個抜き出し、カンマ区切りでキーワードのリストだけを出力して下さい\n```" + ansTextSum + "\n```" )
-    tags = []
-    if len(tagsText.split(",")) > 0:
+    summary = requestLLM("文章を1文かつ100文字以内で要約し、その要約1文のみ短答してください。それ以外の文字は出力に含めないでください。・要約にはどんな意図でこの文章が作られたかを含めてください。", "以下の文章を1文かつ100文字以内で要約し、その要約1文のみ短答してください。それ以外の文字は出力に含めないでください。\n```" + ansTextSum + "\n```" )
+    tagsText = requestLLM("以下の文章から主要なキーワードを重要度が高い順に5個抜き出し、カンマ区切りでキーワードのリストだけを出力して下さい", "以下の文章から主要なキーワードを重要度が高い順に5個抜き出し、半角カンマ区切りで連結されたキーワードのリストだけを出力して下さい"+"\n```" + ansTextSum + "\n```" )
+    
+    if len(tagsText.split(",")) <= 1:
+        tagsText = requestLLM("以下の文章を象徴するキーワードを5個抜き出し、カンマ区切りでキーワードのリストだけを出力して下さい", "以下の文章から主要なキーワードを重要度が高い順に5個抜き出し、半角カンマ区切りで連結されたキーワードのリストだけを出力して下さい"+"\n```" + ansTextSum + "\n```" )
+
+    if len(tagsText.split(",")) > 1:
         tags = tagsText.split(",")[:5]
+    else:
+        tags = []
     updatePageSummary(pageId, summary, tags)
     f.close()
