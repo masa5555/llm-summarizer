@@ -1,6 +1,11 @@
 youtube-transcript-api
 requests
+asyncio
+aiohttp
 anthropic
 bs4
 python-dotenv
 notion-client
+google-generativeai
+gemnine
+pdftotext

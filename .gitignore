@@ -1,2 +1,5 @@
 .env
 summaries
+bin
+error.log
+__pycache__
