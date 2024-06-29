@@ -29,14 +29,14 @@ def isJapanese(text):
 url = input("Enter URL: ")
 
 headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
 }
 
 time_scrap_start = time.time()
 
 response = requests.get(url, headers=headers)
 soup = BeautifulSoup(response.text, 'html.parser')
-title = soup.title.text.replace(r'/', "|", 100)[0:min(50, len(soup.title.text))]
+title = soup.title.text.replace(r'/', "|", 100)[0:min(80, len(soup.title.text))]
 
 time_scrap_end = time.time()
 print("Scraping Time: {} s".format( math.floor(time_scrap_end - time_scrap_start)))
@@ -55,8 +55,11 @@ if url.find("youtube.com") != -1:
         word_list.append(t['text'])
 
 # study paper pdf in arxiv
-elif url.find("arxiv.org/abs/") != -1:
-    bin = requests.get(url.replace("abs", "pdf"), headers=headers)
+elif url.find("arxiv.org/abs/") != -1 or url.endswith(".pdf"):
+    target = url
+    if url.find("arxiv.org/abs/"):
+        target = url.replace("abs", "pdf")
+    bin = requests.get(target, headers=headers)
     if os.path.isdir("bin") == False:
         os.mkdir("bin")
     pdfFileName = "bin/{}.pdf".format(title)
@@ -86,7 +89,8 @@ def separate_chunk_by_length(word_list: list[str]) -> list[str]:
             chunkList.append(chunkTmp)
             chunkTmp = ""
             continue
-    chunkList.append(chunkTmp)
+    if len(chunkTmp) > 0:
+        chunkList.append(chunkTmp)
     return chunkList
 
 chunked_transcript = separate_chunk_by_length(word_list)
@@ -174,6 +178,7 @@ async def requestLLMAsync(session, systemPrompt: str, prompt: str) -> str:
                 "Content-Type": "application/json",
             },
             # "safetySettings": geminiSafetySettings
+            # https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/getting-started/intro_gemini_curl.ipynb
             json={
                 "system_instruction": {
                     "parts": [{"text": systemPrompt}]
@@ -188,7 +193,7 @@ async def requestLLMAsync(session, systemPrompt: str, prompt: str) -> str:
         raise Exception("Invalid USE_LLM_MODEL")
 
 async def generateSummaryAsync(index: int, script: str, session) -> str:
-    prompt = "以下の「{}」というタイトルの文章に対して日本語で要約を出力しなさい\n".format(title) + "```\n" + script + "\n```"
+    prompt = "以下の文章の要約を出力しなさい\n".format(title) + "```\n" + script + "\n```"
     ansText = await requestLLMAsync(session, SYSTEM_PROMPT, prompt)
     print("=== Progress: {}/{} ===\n".format(index+1, len(chunked_transcript)))
     print(ansText)
@@ -225,6 +230,11 @@ def createNotionPage(title, url):
                         }
                     }
                 ]
+            },
+            "status": {
+                "select": {
+                    "name": "未読"
+                }
             }
         }
     )
@@ -365,7 +375,7 @@ with open("summaries/{} {}.md".format(title, datetime.datetime.now().strftime('%
         print("Async Time: {} s".format( math.floor(async_end - async_start)))
     else: 
         for i, script in enumerate(chunked_transcript):
-            ansText = requestLLM(SYSTEM_PROMPT, "以下の「{}」というタイトルの文章に対して日本語で要約を出力しなさい\n".format(title) + "```\n" + script + "\n```")
+            ansText = requestLLM(SYSTEM_PROMPT, "以下の文章の日本語で要約を出力しなさい\n".format(title) + "```\n" + script + "\n```")
             print("=== Progress: {}/{} ===\n".format(i+1, len(chunked_transcript)))
             print(ansText)
             
@@ -403,7 +413,7 @@ with open("summaries/{} {}.md".format(title, datetime.datetime.now().strftime('%
                 block_id=pageId,
                 children=blocks
             )
-            print("success append", len(blocks), "blocks to notion page", end=" ")
+            print("success append", len(blocks), "blocks to notion page")
         notion_api_request_seconds = math.floor(time.time() - time_notion_api_start)
         print("Notion API Insert Request Total Time:",notion_api_request_seconds, "s")
         
@@ -449,3 +459,4 @@ with open("summaries/{} {}.md".format(title, datetime.datetime.now().strftime('%
                 )
             )
             log.close()
+
